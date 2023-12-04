@@ -2,32 +2,34 @@ import json
 import os
 import threading
 import numpy as np
-import requests
-import glob
 import tensorflow as tf
 from bs4 import BeautifulSoup
 import re
 
-from kiwipiepy import Kiwi
-
 from app.tokenizer import kiwi_tokenizer
+from app.boto import read_file_from_s3, parse_s3_link, read_text_file
 from joblib import load
 from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.feature_extraction.text import TfidfTransformer
 
 
-def predict_process(filepath, thresh, count_vectorizer, tfidf_transformer, tflite_model):
-    with open(filepath, 'r', encoding='utf-8', errors='ignore') as file:
-        data = file.read()
-        data = text_preprocesssing(data)
-        if len(data) == 0:
-            return False
-        data = tf_idf_vectorize(data, count_vectorizer, tfidf_transformer)
-        pred = model_predict(data, tflite_model)
-        if pred >= thresh:
-            return True
-        else:
-            return False
+def predict_process(file, thresh, count_vectorizer, tfidf_transformer, tflite_model):
+    # bucket, key = parse_s3_link(file)
+    # data = read_file_from_s3(bucket, key)
+    data = read_text_file(file)
+
+    data_len, data = text_preprocesssing(data)
+    if len(data) == 0:
+        return False
+
+    data = [word for word in data if any(char.isspace() for char in word)]
+
+    data = tf_idf_vectorize(data, count_vectorizer, tfidf_transformer)
+    pred = model_predict(data_len, data, tflite_model)
+    print(pred)
+    if pred >= thresh:
+        return True
+    else:
+        return False
 
 
 def text_preprocesssing(data):
@@ -71,7 +73,7 @@ def text_preprocesssing(data):
     # filter_words에 있는 단어를 포함하고 빈 문자열이 아닌 요소만 리스트에 포함
     filtered_text = [sent for sent in text if any(fw in sent for fw in filter_words) and sent.strip()]
 
-    return filtered_text
+    return len(text), filtered_text
 
 
 def tf_idf_vectorize(data, count_vectorizer, tfidf_transformer):
@@ -81,7 +83,7 @@ def tf_idf_vectorize(data, count_vectorizer, tfidf_transformer):
     return tfidf_vectors
 
 
-def model_predict(data, tflite_model_file):
+def model_predict(data_len, data, tflite_model_file):
     thresh = 0.5
     interpreter = tf.lite.Interpreter(model_path=tflite_model_file)
     interpreter.allocate_tensors()
@@ -90,7 +92,7 @@ def model_predict(data, tflite_model_file):
     output_details = interpreter.get_output_details()
 
     # 확률 평균 계산용 변수
-    num_pred = len(data)
+    num_pred = data_len
     sum_pred = 0
 
     for item in data:
@@ -110,7 +112,7 @@ def model_predict(data, tflite_model_file):
     return sum_pred / num_pred
 
 
-def predict_process_all(directory, thresh):
+def predict_process_all(file_list, thresh):
     base_path = os.path.abspath(os.path.dirname(__file__))
 
     count_vectorizer_path = os.path.join(base_path, '..', 'models', 'count_vectorizer_vocabulary.joblib')
@@ -122,19 +124,19 @@ def predict_process_all(directory, thresh):
     tfidf_transformer = load(tfidf_transformer_path)
 
     results = {}
-    for filepath in glob.glob(os.path.join(directory, '*.txt')):
-        print(f'predicting... {filepath}')
-        filename = os.path.basename(filepath)
-        result = predict_process(filepath, thresh, count_vectorizer, tfidf_transformer, tflite_model_path)
-        results[filename] = result
+    for file in file_list:
+
+        print(f'predicting... {file}')
+        result = predict_process(file, thresh, count_vectorizer, tfidf_transformer, tflite_model_path)
+        results[file] = result
 
     result_json = json.dumps(results, indent=4)
-    response = requests.post("http://localhost:3000/", data=result_json)
-
     print(f'[DATA]\n{result_json}\n\n')
-    print(f'[RESPONSE] Response status code: {response.status_code}')
-    print(response)
+
+    # response = requests.post("http://localhost:8080/", data=result_json)
+    # print(f'[RESPONSE] Response status code: {response.status_code}')
+    # print(response)
 
 
-def commission_station_process(directory, thresh):
-    threading.Thread(target=predict_process_all, args=(directory, thresh,)).start()
+def commission_station_process(file_list, thresh):
+    threading.Thread(target=predict_process_all, args=(file_list, thresh,)).start()
